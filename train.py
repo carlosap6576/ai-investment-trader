@@ -1,6 +1,12 @@
 """
-Train the trading signal classifier.
+Train the Hierarchical Sentiment Trading Signal Classifier.
 Loads prepared data, trains the model, and saves weights.
+
+Uses the HierarchicalSentimentTransformer architecture with:
+- Multi-level news classification (MARKET / SECTOR / TICKER)
+- FinBERT-based financial sentiment analysis
+- Cross-level attention between sentiment levels
+- Temporal sequences for pattern detection
 """
 
 import argparse
@@ -9,6 +15,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from typing import List, Tuple, Optional
 import numpy as np
 
 # =============================================================================
@@ -38,10 +45,8 @@ DEFAULT_COOLDOWN_MINUTES = 5     # Don't train again within 5 minutes (matches d
 DATASETS_DIR = "datasets"
 VALID_OPTIMIZERS = ["SGD", "AdamW"]
 
-# Label encodings (one-hot)
-LABEL_SELL = [1., 0., 0.]
-LABEL_HOLD = [0., 1., 0.]
-LABEL_BUY = [0., 0., 1.]
+# Hierarchical model defaults
+DEFAULT_SEQ_LENGTH = 20          # Temporal sequence length
 
 # =============================================================================
 # HELP TEXT AND CLI INTERFACE
@@ -184,6 +189,16 @@ MODEL ARCHITECTURE (affects model size and capacity):
     NOTE: These parameters affect MODEL SIZE, not training time estimates:
         - epochs, batch_size, learning_rate → affect training behavior
         - hidden_dim, num_layers → affect model capacity and file size
+
+--------------------------------------------------------------------------------
+SEQUENCE LENGTH:
+--------------------------------------------------------------------------------
+
+    --seq-length LENGTH
+        Temporal sequence length for the model.
+        Default: 20 (number of time steps to consider)
+
+        More time steps = more context for pattern detection, but slower.
 
 --------------------------------------------------------------------------------
 CONTINUOUS LEARNING (The Student's Notebook):
@@ -420,6 +435,8 @@ def parse_args():
     # Model architecture (affects model size)
     parser.add_argument("--hidden-dim", type=int, default=DEFAULT_HIDDEN_DIM)
     parser.add_argument("--num-layers", type=int, default=DEFAULT_NUM_LAYERS)
+    parser.add_argument("--seq-length", type=int, default=DEFAULT_SEQ_LENGTH,
+                        help=f"Temporal sequence length (default: {DEFAULT_SEQ_LENGTH})")
 
     # Continuous learning (default: continue from existing model)
     parser.add_argument("--fresh", action="store_true", default=DEFAULT_FRESH_START,
@@ -456,6 +473,8 @@ def parse_args():
         parser.error(f"Hidden dimension must be at least 64 (got {args.hidden_dim})")
     if args.num_layers < 1:
         parser.error(f"Number of layers must be at least 1 (got {args.num_layers})")
+    if args.seq_length < 1:
+        parser.error(f"Sequence length must be at least 1 (got {args.seq_length})")
 
     return args
 
@@ -465,7 +484,8 @@ class Config:
 
     def __init__(self, symbol, buy_threshold, sell_threshold, epochs,
                  learning_rate, optimizer, batch_size, split, model_file,
-                 hidden_dim, num_layers, fresh_start, force, min_new_samples, cooldown):
+                 hidden_dim, num_layers, fresh_start, force, min_new_samples, cooldown,
+                 seq_length=20):
         self.symbol = symbol.upper()
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
@@ -477,6 +497,7 @@ class Config:
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.fresh_start = fresh_start
+        self.seq_length = seq_length
 
         # Smart Training Guard settings
         self.force = force
@@ -529,6 +550,8 @@ class Config:
             f"  Guard status:     {guard_status}\n"
             f"\n"
             f"  [Model Architecture]\n"
+            f"  Model type:       HierarchicalSentimentTransformer\n"
+            f"  Sequence length:  {self.seq_length}\n"
             f"  Hidden dimension: {self.hidden_dim}\n"
             f"  Transformer layers: {self.num_layers}\n"
             f"\n"
@@ -730,89 +753,228 @@ def check_data_file(config):
     return data
 
 
-def load_data(config):
-    """Load and prepare training data with labels."""
-    print(f"  Source:           {config.training_data_file}")
+# =============================================================================
+# HIERARCHICAL MODEL DATA LOADING
+# =============================================================================
 
+def load_hierarchical_data(config):
+    """
+    Load data and build hierarchical feature vectors for the transformer model.
+
+    Returns:
+        Tuple of (train_sequences, train_labels, test_sequences, test_labels)
+        where sequences are numpy arrays of shape (num_samples, seq_length, num_features)
+    """
+    print(f"  Source:           {config.training_data_file}")
+    print(f"  Model type:       hierarchical")
+
+    # Import hierarchical data processing modules
+    try:
+        from src.data.schemas import NewsItem
+        from src.features.feature_builder import TemporalFeatureBuilder, create_label_function
+    except ImportError as e:
+        sys.stderr.write(f"\nERROR: Hierarchical model data modules not found: {e}\n")
+        sys.stderr.write(f"\nMake sure src/data/ and src/features/ modules exist.\n")
+        sys.exit(1)
+
+    # Load raw data
     data = check_data_file(config)
 
-    features = []
-    labels = []
-    label_counts = {"sell": 0, "hold": 0, "buy": 0}
-
+    # Convert to NewsItem objects
+    news_items = []
     for item in data:
-        # Create text feature from price and news
-        feature_text = "\n".join([
-            f"Price: {item['price']}",
-            f"Headline: {item['title']}",
-            f"Summary: {item['summary']}"
-        ])
-        features.append(feature_text)
+        try:
+            news_item = NewsItem(
+                headline=item.get('title', ''),
+                summary=item.get('summary', ''),
+                timestamp=datetime.fromisoformat(item['pubDate'].replace('Z', '+00:00')),
+                source=item.get('source', 'unknown'),
+                url=item.get('url', ''),
+                level=item.get('level', 'TICKER'),
+                sentiment_score=item.get('sentiment_score', 0.0),
+                sentiment_label=item.get('sentiment_label', 'neutral'),
+                price=item.get('price', 0.0),
+                future_price=item.get('future_price'),
+                price_change_pct=item.get('percentage', 0.0),
+            )
+            news_items.append(news_item)
+        except (KeyError, ValueError) as e:
+            continue  # Skip malformed items
 
-        # Generate label based on percentage change
-        pct = item['percentage']
-        if pct < config.sell_threshold:
-            labels.append(LABEL_SELL)
+    if len(news_items) == 0:
+        print(f"\nERROR: No valid news items found in data.")
+        print(f"Make sure the data was downloaded with hierarchical fields.")
+        print(f"Re-run: python download.py -s {config.symbol}")
+        sys.exit(1)
+
+    print(f"  Valid news items: {len(news_items)}")
+
+    # Create feature builder
+    feature_builder = TemporalFeatureBuilder(
+        target_ticker=config.symbol,
+        sequence_length=config.seq_length,
+    )
+
+    # Create label function
+    label_func = create_label_function(
+        buy_threshold=config.buy_threshold,
+        sell_threshold=config.sell_threshold,
+    )
+
+    # Build training data
+    sequences, labels, timestamps = feature_builder.build_training_data(
+        news_items=news_items,
+        label_func=label_func,
+    )
+
+    print(f"  Total sequences:  {len(sequences)}")
+    print(f"  Sequence shape:   {sequences.shape}")
+
+    # Count label distribution
+    label_counts = {"sell": 0, "hold": 0, "buy": 0}
+    for label in labels:
+        if label == 0:
             label_counts["sell"] += 1
-        elif pct > config.buy_threshold:
-            labels.append(LABEL_BUY)
-            label_counts["buy"] += 1
-        else:
-            labels.append(LABEL_HOLD)
+        elif label == 1:
             label_counts["hold"] += 1
+        else:
+            label_counts["buy"] += 1
 
-    print(f"  Total samples:    {len(features)}")
-    print(f"  Label distribution:")
-    print(f"    SELL:  {label_counts['sell']:>4}  ({label_counts['sell']/len(features)*100:>5.1f}%)")
-    print(f"    HOLD:  {label_counts['hold']:>4}  ({label_counts['hold']/len(features)*100:>5.1f}%)")
-    print(f"    BUY:   {label_counts['buy']:>4}  ({label_counts['buy']/len(features)*100:>5.1f}%)")
-
-    # Warn if distribution is heavily skewed
-    total = len(features)
+    total = len(labels)
     if total > 0:
+        print(f"  Label distribution:")
+        print(f"    SELL:  {label_counts['sell']:>4}  ({label_counts['sell']/total*100:>5.1f}%)")
+        print(f"    HOLD:  {label_counts['hold']:>4}  ({label_counts['hold']/total*100:>5.1f}%)")
+        print(f"    BUY:   {label_counts['buy']:>4}  ({label_counts['buy']/total*100:>5.1f}%)")
+
         hold_pct = label_counts["hold"] / total * 100
         if hold_pct > 90:
             print(f"\n  ⚠️  WARNING: {hold_pct:.0f}% of samples are HOLD!")
             print(f"      Consider adjusting thresholds (currently >{config.buy_threshold}% / <{config.sell_threshold}%)")
-            print(f"      Try: -b {config.buy_threshold/2} --sell-threshold {config.sell_threshold/2}")
 
-    return features, labels
+    # Split data
+    split_index = int(config.split * len(sequences))
 
-
-def split_data(config, features, labels):
-    """Split data into training and test sets."""
-    split_index = int(config.split * len(features))
-
-    train_features = features[:split_index]
+    train_sequences = sequences[:split_index]
     train_labels = labels[:split_index]
-    test_features = features[split_index:]
+    test_sequences = sequences[split_index:]
     test_labels = labels[split_index:]
 
     print(f"  Train/Test split:")
-    print(f"    Train set:      {len(train_features):>4} samples ({config.split*100:.0f}%)")
-    print(f"    Test set:       {len(test_features):>4} samples ({(1-config.split)*100:.0f}%)")
+    print(f"    Train set:      {len(train_sequences):>4} sequences ({config.split*100:.0f}%)")
+    print(f"    Test set:       {len(test_sequences):>4} sequences ({(1-config.split)*100:.0f}%)")
 
-    return train_features, train_labels, test_features, test_labels
+    return train_sequences, train_labels, test_sequences, test_labels
+
+
+def train_hierarchical_model(config, model, optimizer, criterion, train_sequences, train_labels):
+    """Train the hierarchical model on temporal sequences."""
+    import torch
+
+    print(f"  Epochs:           {config.epochs}")
+    print(f"  Batch size:       {config.batch_size}")
+    print(f"  Sequences:        {len(train_sequences)}")
+    print()
+
+    item_losses = []
+
+    model.train()
+    for epoch in range(config.epochs):
+        # Shuffle data each epoch
+        indices = np.random.permutation(len(train_sequences))
+        sequences = train_sequences[indices]
+        targets = train_labels[indices]
+
+        epoch_loss = 0
+        num_batches = max(1, len(sequences) // config.batch_size)
+
+        for i in range(num_batches):
+            start_idx = i * config.batch_size
+            end_idx = min(start_idx + config.batch_size, len(sequences))
+
+            batch_seq = torch.from_numpy(sequences[start_idx:end_idx]).float().to(model.device)
+            batch_target = torch.from_numpy(targets[start_idx:end_idx]).long().to(model.device)
+
+            optimizer.zero_grad()
+            logits = model(batch_seq)
+
+            loss = criterion(logits, batch_target)
+            loss.backward()
+            optimizer.step()
+
+            item_losses.append(loss.item())
+            epoch_loss += loss.item()
+
+        # Rolling average loss (last 250 samples)
+        avg_loss = sum(item_losses[-250:]) / len(item_losses[-250:])
+        print(f"  Epoch {epoch + 1}/{config.epochs}: avg_loss={avg_loss:.4f}")
+
+
+def evaluate_hierarchical(config, model, test_sequences, test_labels):
+    """Evaluate hierarchical model on test sequences."""
+    import torch
+    from sklearn.metrics import f1_score
+
+    print(f"  Test sequences:   {len(test_sequences)}")
+
+    correct = 0
+    total = 0
+    all_predictions = []
+    all_actuals = []
+
+    model.eval()
+    with torch.no_grad():
+        for i in range(len(test_sequences)):
+            seq = torch.from_numpy(test_sequences[i:i+1]).float().to(model.device)
+            target = test_labels[i]
+
+            logits = model(seq)
+            probs = logits.softmax(dim=-1).cpu()
+            predicted = torch.argmax(probs, dim=-1).item()
+
+            all_predictions.append(predicted)
+            all_actuals.append(target)
+
+            if predicted == target:
+                correct += 1
+            total += 1
+
+    accuracy = correct / total if total > 0 else 0
+    f1 = f1_score(all_actuals, all_predictions, average='weighted', zero_division=0)
+
+    print(f"  Results:")
+    print(f"    Accuracy:       {correct}/{total} = {accuracy:.2%}")
+    print(f"    F1 Score:       {f1:.4f}")
+
+    return accuracy, f1
 
 
 def create_model(config):
-    """Initialize model and optimizer, optionally loading existing weights."""
+    """Initialize HierarchicalSentimentTransformer and optimizer, optionally loading existing weights."""
     # Lazy import to allow --help without dependencies
     try:
         import torch
-        from torch import nn
-        from models.gemma_transformer_classifier import SimpleGemmaTransformerClassifier
     except ImportError as e:
         sys.stderr.write(f"\nERROR: Required dependencies are not installed.\n")
         sys.stderr.write(f"\nTo install them, run:\n")
         sys.stderr.write(f"  pip install -r requirements.txt\n\n")
         sys.exit(1)
 
-    # Create model with custom architecture if specified
-    model = SimpleGemmaTransformerClassifier(
+    # Import hierarchical model
+    try:
+        from src.models.transformer import HierarchicalSentimentTransformer
+        from src.training.losses import TradingSignalLoss
+    except ImportError as e:
+        sys.stderr.write(f"\nERROR: Model dependencies not found: {e}\n")
+        sys.stderr.write(f"\nMake sure src/models/transformer.py and src/training/losses.py exist.\n")
+        sys.exit(1)
+
+    model = HierarchicalSentimentTransformer(
         hidden_dim=config.hidden_dim,
-        num_layers=config.num_layers
+        num_temporal_layers=config.num_layers,
+        sequence_length=config.seq_length,
     )
+    criterion = TradingSignalLoss()
 
     # Continuous learning: Load existing weights if available and not fresh start
     loaded_existing = False
@@ -829,12 +991,12 @@ def create_model(config):
     else:
         optimizer = torch.optim.SGD(model.parameters(), lr=config.learning_rate)
 
-    criterion = nn.CrossEntropyLoss()
-
     print(f"\n" + "-" * 60)
     print("MODEL INITIALIZED")
     print("-" * 60)
+    print(f"  Model type:       HierarchicalSentimentTransformer")
     print(f"  Device:           {model.device}")
+    print(f"  Sequence length:  {config.seq_length}")
     print(f"  Hidden dimension: {config.hidden_dim}")
     print(f"  Transformer layers: {config.num_layers}")
     print(f"  Optimizer:        {config.optimizer}")
@@ -859,108 +1021,40 @@ def create_model(config):
     return model, optimizer, criterion
 
 
-def train_model(config, model, optimizer, criterion, train_features, train_labels):
-    """Train the model."""
-    import torch
-
-    print(f"  Epochs:           {config.epochs}")
-    print(f"  Batch size:       {config.batch_size}")
-    print(f"  Samples:          {len(train_features)}")
-    print()
-
-    train_features = np.array(train_features)
-    train_labels = np.array(train_labels)
-    item_losses = []
-
-    model.train()
-    for epoch in range(config.epochs):
-        # Shuffle data each epoch
-        indices = np.random.permutation(len(train_features))
-        inputs = train_features[indices]
-        targets = train_labels[indices]
-
-        epoch_loss = 0
-        num_batches = len(inputs) // config.batch_size
-
-        for i in range(num_batches):
-            batch_input = inputs[i * config.batch_size : i * config.batch_size + config.batch_size]
-            batch_target = torch.from_numpy(
-                targets[i * config.batch_size : i * config.batch_size + config.batch_size]
-            )
-
-            optimizer.zero_grad()
-            logits = model(batch_input)
-
-            loss = criterion(
-                logits,
-                batch_target.float().to(model.device)
-            )
-            loss.backward()
-            optimizer.step()
-
-            item_losses.append(loss.item())
-            epoch_loss += loss.item()
-
-        # Rolling average loss (last 250 samples)
-        avg_loss = sum(item_losses[-250:]) / len(item_losses[-250:])
-        print(f"  Epoch {epoch + 1}/{config.epochs}: avg_loss={avg_loss:.4f}")
-
-
-def evaluate(config, model, test_features, test_labels):
-    """Evaluate model on test set."""
-    import torch
-    from sklearn.metrics import f1_score
-
-    print(f"  Test samples:     {len(test_features)}")
-
-    correct = 0
-    total = 0
-    all_predictions = []
-    all_actuals = []
-
-    model.eval()
-    with torch.no_grad():
-        for i in range(len(test_features)):
-            input_text = [test_features[i]]
-            target = torch.tensor(test_labels[i])
-
-            logits = model(input_text)
-            probs = logits.softmax(dim=-1).cpu()
-            predicted = torch.argmax(probs, dim=-1)
-            actual = torch.argmax(target.float().to(model.device))
-
-            all_predictions.append(predicted.item())
-            all_actuals.append(actual.item())
-
-            if predicted.item() == actual.item():
-                correct += 1
-            total += 1
-
-    accuracy = correct / total
-    f1 = f1_score(all_actuals, all_predictions, average='weighted')
-
-    print(f"  Results:")
-    print(f"    Accuracy:       {correct}/{total} = {accuracy:.2%}")
-    print(f"    F1 Score:       {f1:.4f}")
-
-    return accuracy, f1
-
-
 def save_model(config, model):
-    """Save model weights to disk."""
+    """Save model weights and architecture metadata to disk."""
     import torch
+    import json
 
     # Create directory if needed
     model_dir = os.path.dirname(config.model_file)
     if model_dir:
         os.makedirs(model_dir, exist_ok=True)
 
+    # Save model weights
     torch.save(model.state_dict(), config.model_file)
+
+    # Save architecture metadata for auto-detection during testing
+    metadata_file = config.model_file.replace('.pth', '_metadata.json')
+    metadata = {
+        'hidden_dim': config.hidden_dim,
+        'num_layers': config.num_layers,
+        'seq_length': config.seq_length,
+        'symbol': config.symbol,
+        'buy_threshold': config.buy_threshold,
+        'sell_threshold': config.sell_threshold,
+    }
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f, indent=2)
 
     print("\n" + "-" * 60)
     print("MODEL SAVED")
     print("-" * 60)
-    print(f"  File:             {config.model_file}")
+    print(f"  Model file:       {config.model_file}")
+    print(f"  Metadata file:    {metadata_file}")
+    print(f"  Hidden dim:       {config.hidden_dim}")
+    print(f"  Num layers:       {config.num_layers}")
+    print(f"  Seq length:       {config.seq_length}")
     print("-" * 60)
 
 
@@ -984,11 +1078,12 @@ def main():
         fresh_start=args.fresh,
         force=args.force,
         min_new_samples=args.min_new_samples,
-        cooldown=args.cooldown
+        cooldown=args.cooldown,
+        seq_length=args.seq_length
     )
 
     print("\n" + "=" * 60)
-    print("        TRADING SIGNAL CLASSIFIER - TRAINING")
+    print("  HIERARCHICAL SENTIMENT TRADING SIGNAL CLASSIFIER - TRAINING")
     print("=" * 60)
     print(f"\nCONFIGURATION:{config}")
     print("\n" + "=" * 60)
@@ -1004,32 +1099,47 @@ def main():
     # Calculate data hash before training (for metadata)
     data_hash = calculate_data_hash(config)
 
-    # Load and prepare data
-    print("\nLOADING DATA...")
-    print("-" * 60)
-    features, labels = load_data(config)
-    train_features, train_labels, test_features, test_labels = split_data(config, features, labels)
-
-    # Create model
+    # Create model first (needed for device info)
     print("\nINITIALIZING MODEL...")
     model, optimizer, criterion = create_model(config)
+
+    # Load hierarchical data (temporal sequences)
+    print("\nLOADING DATA...")
+    print("-" * 60)
+    train_sequences, train_labels, test_sequences, test_labels = load_hierarchical_data(config)
+
+    # Compute class weights to handle imbalanced data
+    import torch
+    from src.training.losses import TradingSignalLoss, compute_class_weights
+    train_labels_tensor = torch.tensor(train_labels) if not isinstance(train_labels, torch.Tensor) else train_labels
+    class_weights = compute_class_weights(train_labels_tensor, num_classes=3, method='sqrt')
+    print(f"\n  Class weights (sqrt method): SELL={class_weights[0]:.3f}, HOLD={class_weights[1]:.3f}, BUY={class_weights[2]:.3f}")
+
+    # Recreate criterion with class weights
+    criterion = TradingSignalLoss(
+        class_weights=class_weights.to(model.device),
+        focal_gamma=2.0,
+        directional_penalty=1.5,
+    )
 
     # Train
     print("\nTRAINING...")
     print("-" * 60)
-    train_model(config, model, optimizer, criterion, train_features, train_labels)
+    train_hierarchical_model(config, model, optimizer, criterion, train_sequences, train_labels)
 
     # Evaluate
     print("\n" + "-" * 60)
     print("EVALUATION")
     print("-" * 60)
-    accuracy, f1 = evaluate(config, model, test_features, test_labels)
+    accuracy, f1 = evaluate_hierarchical(config, model, test_sequences, test_labels)
+
+    total_samples = len(train_sequences) + len(test_sequences)
 
     # Save model
     save_model(config, model)
 
     # Save training metadata (for Smart Guard)
-    save_training_metadata(config, data_hash, len(features), accuracy, f1)
+    save_training_metadata(config, data_hash, total_samples, accuracy, f1)
     print(f"\n  Training metadata saved to: {config.metadata_file}")
 
     print("\nDone!")

@@ -1,18 +1,24 @@
 """
 Download and prepare market data for training.
 Fetches price data and news, then merges them for model training.
+
+Enhanced with hierarchical sentiment analysis:
+- News classification into MARKET/SECTOR/TICKER levels
+- FinBERT sentiment analysis for financial text
+- Relevance filtering to remove irrelevant news
 """
 
 import argparse
 import json
 import datetime
 import os
-import shutil
 import sys
-import textwrap
 
-# Delay yfinance import to allow --help to work without dependencies
+# Delay imports to allow --help to work without dependencies
 yf = None
+NewsLevelClassifier = None
+FinBERTSentimentAnalyzer = None
+get_sector = None
 
 # =============================================================================
 # DEFAULTS - Used when CLI arguments are not provided
@@ -21,6 +27,8 @@ yf = None
 DEFAULT_PERIOD = "1mo"          # How far back to fetch
 DEFAULT_INTERVAL = "5m"         # Candle interval
 DEFAULT_NEWS_COUNT = 100        # Number of news articles to fetch
+DEFAULT_NO_FILTER = False       # Whether to disable news filtering
+DEFAULT_NO_SENTIMENT = False    # Whether to disable FinBERT sentiment analysis
 DATASETS_DIR = "datasets"
 
 # =============================================================================
@@ -166,6 +174,16 @@ OPTIONAL ARGUMENTS:
         Number of news articles to fetch.
         Default: 100
 
+    --no-filter
+        Disable news relevance filtering.
+        By default, news is filtered to only include relevant articles.
+        Use this flag to keep all news (useful for debugging).
+
+    --no-sentiment
+        Disable FinBERT sentiment analysis.
+        Skips the sentiment scoring step (faster download).
+        Useful when you don't need hierarchical sentiment features.
+
     -h, --help
         Show this help message and exit.
 
@@ -218,7 +236,29 @@ OUTPUT:
     Files created:
       - historical_data.json    Price data (timestamp -> price)
       - news.json               Raw news articles
-      - news_with_price.json    Training data (news + price labels)
+      - news_with_price.json    Training data with hierarchical features:
+                                  • level: MARKET/SECTOR/TICKER classification
+                                  • sector_gics: GICS sector code
+                                  • sentiment_score: -1 to +1 (FinBERT)
+                                  • sentiment_label: positive/negative/neutral
+
+--------------------------------------------------------------------------------
+HIERARCHICAL SENTIMENT FEATURES:
+--------------------------------------------------------------------------------
+
+    News articles are classified into three levels:
+
+    MARKET    Fed announcements, GDP, unemployment, geopolitical events
+              (affects all stocks)
+
+    SECTOR    Industry-wide news, regulatory changes affecting sectors
+              (affects stocks in the same sector)
+
+    TICKER    Company-specific earnings, management, products, lawsuits
+              (affects only this specific stock)
+
+    Irrelevant news (not related to the target symbol) is filtered out
+    unless --no-filter is specified.
 
 ================================================================================
 """
@@ -317,6 +357,10 @@ def parse_args():
     parser.add_argument("-p", "--period", default=DEFAULT_PERIOD, choices=VALID_PERIODS)
     parser.add_argument("-i", "--interval", default=DEFAULT_INTERVAL, choices=VALID_INTERVALS)
     parser.add_argument("-n", "--news-count", type=int, default=DEFAULT_NEWS_COUNT)
+    parser.add_argument("--no-filter", action="store_true", default=DEFAULT_NO_FILTER,
+                        help="Disable news relevance filtering")
+    parser.add_argument("--no-sentiment", action="store_true", default=DEFAULT_NO_SENTIMENT,
+                        help="Disable FinBERT sentiment analysis")
     parser.add_argument("-h", "--help", action="store_true")
 
     args = parser.parse_args()
@@ -333,12 +377,14 @@ def parse_args():
 class Config:
     """Configuration container for download parameters."""
 
-    def __init__(self, symbol, period, interval, news_count):
+    def __init__(self, symbol, period, interval, news_count, no_filter=False, no_sentiment=False):
         self.symbol = symbol.upper()
         self.period = period
         self.interval = interval
         self.interval_seconds = INTERVAL_SECONDS[interval]
         self.news_count = news_count
+        self.no_filter = no_filter
+        self.no_sentiment = no_sentiment
 
         # Derived paths
         self.symbol_dir = f"{DATASETS_DIR}/{self.symbol}"
@@ -352,6 +398,8 @@ class Config:
             f"  Period: {self.period}\n"
             f"  Interval: {self.interval} ({self.interval_seconds}s)\n"
             f"  News count: {self.news_count}\n"
+            f"  News filtering: {'disabled' if self.no_filter else 'enabled'}\n"
+            f"  Sentiment analysis: {'disabled' if self.no_sentiment else 'enabled'}\n"
             f"  Output dir: {self.symbol_dir}/"
         )
 
@@ -644,9 +692,12 @@ def prepare_data(config):
     Merge news with price data to create training dataset.
 
     For each news article:
-    1. Find the price at publication time (rounded to interval)
-    2. Find the price one interval later
-    3. Calculate percentage change (future - current) / current
+    1. Filter irrelevant news (unless --no-filter)
+    2. Classify into MARKET/SECTOR/TICKER levels
+    3. Find the price at publication time (rounded to interval)
+    4. Find the price one interval later
+    5. Calculate percentage change (future - current) / current
+    6. Run FinBERT sentiment analysis (unless --no-sentiment)
 
     Positive percentage = price went UP after news
     Negative percentage = price went DOWN after news
@@ -656,11 +707,11 @@ def prepare_data(config):
 
     # Load data
     with open(config.historical_data_file, 'r') as f:
-        ticker = json.load(f)
+        ticker_prices = json.load(f)
     with open(config.news_file, 'r') as f:
         news = json.load(f)
 
-    if not ticker:
+    if not ticker_prices:
         print("  WARNING: No price data available. Skipping data preparation.")
         return
 
@@ -668,8 +719,39 @@ def prepare_data(config):
         print("  WARNING: No news data available. Skipping data preparation.")
         return
 
+    # Initialize news classifier
+    classifier = None
+    if NewsLevelClassifier is not None:
+        strict_filtering = not config.no_filter
+        classifier = NewsLevelClassifier(config.symbol, strict_filtering=strict_filtering)
+        print(f"  News filtering: {'disabled' if config.no_filter else 'enabled'}")
+
+    # Get sector for the symbol
+    sector_gics = None
+    if get_sector is not None:
+        sector_gics = get_sector(config.symbol)
+        if sector_gics:
+            print(f"  Sector: {sector_gics}")
+
+    # Initialize FinBERT sentiment analyzer (if enabled)
+    sentiment_analyzer = None
+    if not config.no_sentiment and FinBERTSentimentAnalyzer is not None:
+        print("  Loading FinBERT for sentiment analysis...")
+        try:
+            sentiment_analyzer = FinBERTSentimentAnalyzer()
+        except Exception as e:
+            print(f"  WARNING: Could not load FinBERT: {e}")
+            print("  Continuing without sentiment analysis.")
+            sentiment_analyzer = None
+
     matched = 0
     skipped = 0
+    filtered = 0
+    level_counts = {"MARKET": 0, "SECTOR": 0, "TICKER": 0}
+
+    # Collect texts for batch sentiment analysis
+    texts_for_sentiment = []
+    items_for_sentiment = []
 
     for item in news:
         # Handle different news formats
@@ -690,6 +772,19 @@ def prepare_data(config):
             skipped += 1
             continue
 
+        # Classify news level (MARKET/SECTOR/TICKER or None if irrelevant)
+        level = None
+        if classifier is not None:
+            level = classifier.classify({'headline': title, 'summary': summary})
+            if level is None:
+                filtered += 1
+                continue
+            level_counts[level] += 1
+        else:
+            # Default to TICKER if no classifier available
+            level = "TICKER"
+            level_counts["TICKER"] += 1
+
         # Convert pubDate to unix timestamp (seconds)
         try:
             if isinstance(pubDate, str):
@@ -704,8 +799,8 @@ def prepare_data(config):
         index = pubDate_ts - (pubDate_ts % config.interval_seconds)
 
         # Look up prices (keys are milliseconds, so append "000")
-        price = ticker.get(f"{index}000")
-        future_price = ticker.get(f"{index + config.interval_seconds}000")
+        price = ticker_prices.get(f"{index}000")
+        future_price = ticker_prices.get(f"{index + config.interval_seconds}000")
 
         if price is None or future_price is None:
             skipped += 1
@@ -715,7 +810,8 @@ def prepare_data(config):
         difference = future_price - price
         percentage = (difference / price) * 100
 
-        output.append({
+        # Build the training record with hierarchical fields
+        record = {
             'title': title,
             'index': index,
             'price': price,
@@ -725,13 +821,48 @@ def prepare_data(config):
             'summary': summary,
             'pubDate': pubDate if isinstance(pubDate, str) else datetime.datetime.fromtimestamp(pubDate).isoformat(),
             'pubDate_ts': pubDate_ts,
-        })
+            # NEW: Hierarchical sentiment fields
+            'level': level,
+            'sector_gics': sector_gics,
+            'sentiment_score': None,
+            'sentiment_label': None,
+            'sentiment_confidence': None,
+        }
+
+        output.append(record)
+
+        # Prepare text for sentiment analysis
+        if sentiment_analyzer is not None:
+            text = f"{title} {summary}".strip()
+            texts_for_sentiment.append(text)
+            items_for_sentiment.append(record)
+
         matched += 1
+
+    # Run batch sentiment analysis
+    if sentiment_analyzer is not None and texts_for_sentiment:
+        print(f"  Running FinBERT sentiment analysis on {len(texts_for_sentiment)} articles...")
+        try:
+            results = sentiment_analyzer.analyze_batch(texts_for_sentiment)
+            for record, result in zip(items_for_sentiment, results):
+                record['sentiment_score'] = result.score
+                record['sentiment_label'] = result.label
+                record['sentiment_confidence'] = result.confidence
+            print(f"  Sentiment analysis complete.")
+        except Exception as e:
+            print(f"  WARNING: Sentiment analysis failed: {e}")
 
     with open(config.training_data_file, 'w') as f:
         json.dump(output, f, indent=4)
 
-    print(f"  Matched {matched} articles with price data, skipped {skipped}")
+    # Print summary
+    print(f"  Matched {matched} articles with price data")
+    if filtered > 0:
+        print(f"  Filtered out {filtered} irrelevant articles")
+    if skipped > 0:
+        print(f"  Skipped {skipped} articles (missing data)")
+    print(f"  Level distribution: MARKET={level_counts['MARKET']}, "
+          f"SECTOR={level_counts['SECTOR']}, TICKER={level_counts['TICKER']}")
     print(f"  Saved training data to {config.training_data_file}")
 
 
@@ -740,7 +871,7 @@ def main():
     args = parse_args()
 
     # Lazy import data provider (allows --help to work without dependencies)
-    global yf
+    global yf, NewsLevelClassifier, FinBERTSentimentAnalyzer, get_sector
     try:
         import yfinance as yf_module
         yf = yf_module
@@ -749,6 +880,28 @@ def main():
         sys.stderr.write("\nTo install them, run:\n")
         sys.stderr.write("  pip install -r requirements.txt\n\n")
         sys.exit(1)
+
+    # Try to import hierarchical sentiment modules (optional)
+    try:
+        from src.data.news_classifier import NewsLevelClassifier as NLC
+        from src.data.sector_mapping import get_sector as gs
+        NewsLevelClassifier = NLC
+        get_sector = gs
+    except ImportError:
+        print("  Note: News classifier not available - classification disabled")
+        NewsLevelClassifier = None
+        get_sector = None
+
+    # Try to import FinBERT (optional, may take time to load)
+    if not args.no_sentiment:
+        try:
+            from src.models.finbert_sentiment import FinBERTSentimentAnalyzer as FSA
+            FinBERTSentimentAnalyzer = FSA
+        except ImportError:
+            print("  Note: FinBERT not available - sentiment analysis disabled")
+            FinBERTSentimentAnalyzer = None
+    else:
+        FinBERTSentimentAnalyzer = None
 
     print("=" * 60)
     print("MARKET DATA DOWNLOADER")
@@ -783,7 +936,9 @@ def main():
         symbol=args.symbol,
         period=args.period,
         interval=args.interval,
-        news_count=args.news_count
+        news_count=args.news_count,
+        no_filter=args.no_filter,
+        no_sentiment=args.no_sentiment
     )
 
     print(f"  Configuration:")
@@ -791,6 +946,8 @@ def main():
     print(f"    Period:     {config.period}")
     print(f"    Interval:   {config.interval} ({config.interval_seconds}s)")
     print(f"    News count: {config.news_count}")
+    print(f"    Filtering:  {'disabled' if config.no_filter else 'enabled'}")
+    print(f"    Sentiment:  {'disabled' if config.no_sentiment else 'enabled'}")
     print(f"    Output dir: {config.symbol_dir}/")
 
     # Create fresh data files
@@ -812,7 +969,14 @@ def main():
     print(f"\nFiles created in {config.symbol_dir}/:")
     print(f"  • historical_data.json   (price data)")
     print(f"  • news.json              (news articles)")
-    print(f"  • news_with_price.json   (training data)")
+    print(f"  • news_with_price.json   (training data with hierarchical features)")
+    if not config.no_filter:
+        print(f"\nHierarchical sentiment fields added:")
+        print(f"  • level: MARKET/SECTOR/TICKER classification")
+        print(f"  • sector_gics: GICS sector code")
+    if not config.no_sentiment:
+        print(f"  • sentiment_score: FinBERT score (-1 to +1)")
+        print(f"  • sentiment_label: positive/negative/neutral")
     print(f"\nNext steps:")
     print(f"  python train.py -s {config.symbol}")
     print()

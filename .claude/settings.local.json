@@ -7,7 +7,12 @@
       "Bash(pip install:*)",
       "Bash(pip show:*)",
       "WebFetch(domain:ranaroussi.github.io)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(du:*)",
+      "Bash(git -C /mnt/e/github.com/ai-investment-trader log --oneline -10)"
     ]
   }
 }
