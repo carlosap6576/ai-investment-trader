@@ -6,21 +6,21 @@ This file provides technical guidance for Claude Code and developers working wit
 CORE COMMANDS PIPELINE (DO NOT DELETE):
   Option A: Maximum Intraday Data (1 month, 5-minute)
 
-  python download.py -s AAPL -p 1mo -i 5m -n 2000
-  python train.py -s AAPL -b 0.1 --sell-threshold -0.1 --batch-size 1 -l 0.001 -o AdamW --hidden-dim 512 --num-layers 4 -e 300
-  python test.py -s AAPL -b 0.1 --sell-threshold -0.1 --samples 10 --summary
+  python -m cli.finbert_sentiment.download -s AAPL -p 1mo -i 5m -n 2000
+  python -m cli.finbert_sentiment.train -s AAPL -b 0.1 --sell-threshold -0.1 --batch-size 1 -l 0.001 -o AdamW --hidden-dim 512 --num-layers 4 -e 300
+  python -m cli.finbert_sentiment.test -s AAPL -b 0.1 --sell-threshold -0.1 --samples 10 --summary
 
   Option B: More History (3 months, hourly)
 
-  python download.py -s AAPL -p 3mo -i 1h -n 2000
-  python train.py -s AAPL -b 0.3 --sell-threshold -0.3 --batch-size 1 -l 0.001 -o AdamW --hidden-dim 512 --num-layers 4 -e 300
-  python test.py -s AAPL -b 0.3 --sell-threshold -0.3 --samples 10 --summary
+  python -m cli.finbert_sentiment.download -s AAPL -p 3mo -i 1h -n 2000
+  python -m cli.finbert_sentiment.train -s AAPL -b 0.3 --sell-threshold -0.3 --batch-size 1 -l 0.001 -o AdamW --hidden-dim 512 --num-layers 4 -e 300
+  python -m cli.finbert_sentiment.test -s AAPL -b 0.3 --sell-threshold -0.3 --samples 10 --summary
 
   Option C: Maximum History (1 year, daily)
 
-  python download.py -s AAPL -p 1y -i 1d -n 2000
-  python train.py -s AAPL -b 1.0 --sell-threshold -1.0 --batch-size 1 -l 0.001 -o AdamW --hidden-dim 512 --num-layers 4 -e 300
-  python test.py -s AAPL -b 1.0 --sell-threshold -1.0 --samples 10 --summary
+  python -m cli.finbert_sentiment.download -s AAPL -p 1y -i 1d -n 2000
+  python -m cli.finbert_sentiment.train -s AAPL -b 1.0 --sell-threshold -1.0 --batch-size 1 -l 0.001 -o AdamW --hidden-dim 512 --num-layers 4 -e 300
+  python -m cli.finbert_sentiment.test -s AAPL -b 1.0 --sell-threshold -1.0 --samples 10 --summary
 
 ```
 
@@ -34,6 +34,7 @@ CORE COMMANDS PIPELINE (DO NOT DELETE):
 - [Configuration Parameters](#configuration-parameters)
 - [Advanced Threshold Tuning](#advanced-threshold-tuning)
 - [Model Architecture](#model-architecture)
+- [Hierarchical Sentiment Features](#hierarchical-sentiment-features)
 - [Data Flow](#data-flow)
 - [Smart Training Guard](#smart-training-guard)
 - [Parameter Consistency Rules](#parameter-consistency-rules)
@@ -47,69 +48,122 @@ CORE COMMANDS PIPELINE (DO NOT DELETE):
 
 ```
 ai-investment-trader/
-├── download.py                 # Data collection script
-├── train.py                    # Model training script
-├── test.py                     # Model evaluation script
-├── requirements.txt            # Python dependencies
-├── README.md                   # Learning guide (start here)
-├── CLAUDE.md                   # Technical reference (this file)
+├── cli/                               # Command-line interface
+│   └── finbert_sentiment/             # FinBERT sentiment strategy
+│       ├── __init__.py
+│       ├── download.py                # Data collection with sentiment analysis
+│       ├── train.py                   # Model training with Smart Guard
+│       └── test.py                    # Evaluation with AI summary
 │
-├── models/
-│   └── gemma_transformer_classifier.py  # Neural network model
+├── src/                               # Core application logic
+│   ├── data/
+│   │   ├── news_classifier.py         # MARKET/SECTOR/TICKER classification
+│   │   ├── schemas.py                  # Data structures (40 features)
+│   │   └── sector_mapping.py           # GICS sector codes
+│   │
+│   ├── features/
+│   │   ├── sentiment_aggregator.py     # Multi-level sentiment aggregation
+│   │   └── feature_builder.py          # Temporal sequence construction
+│   │
+│   ├── models/
+│   │   ├── transformer.py              # HierarchicalSentimentTransformer
+│   │   ├── finbert_sentiment.py        # FinBERT analyzer with caching
+│   │   ├── report_summarizer.py        # Flan-T5 AI summary generator
+│   │   └── gemma_transformer_classifier.py  # Legacy Gemma-based model
+│   │
+│   └── evaluation/
+│       ├── metrics.py                  # Trading-specific metrics
+│       └── report_generator.py         # Formatted evaluation reports
 │
-└── datasets/
-    └── {SYMBOL}/               # Per-symbol data folder
-        ├── {SYMBOL}.pth        # Trained model weights
-        ├── .training_meta.json # Training history & metadata
-        ├── historical_data.json # Price data (regenerable)
-        ├── news.json           # Raw news articles (regenerable)
-        └── news_with_price.json # Merged training data (regenerable)
+├── ai/                                # Reusable AI components
+│   ├── sentiment/
+│   │   └── finbert.py                  # FinBERT sentiment analyzer
+│   ├── embeddings/
+│   │   └── gemma.py                    # Gemma text embeddings
+│   └── summarizers/
+│       └── flan_t5.py                  # Flan-T5 report summarizer
+│
+├── core/                              # Shared infrastructure
+│   ├── config/
+│   │   └── constants.py                # Centralized defaults
+│   ├── utils/
+│   │   └── device.py                   # GPU/CPU detection
+│   └── cli/
+│       └── parser.py                   # FriendlyArgumentParser
+│
+├── models/                            # Legacy model definitions
+│   └── gemma_transformer_classifier.py
+│
+├── datasets/                          # Per-symbol data and models
+│   └── {SYMBOL}/
+│       ├── {SYMBOL}.pth               # Trained model weights
+│       ├── {SYMBOL}_metadata.json     # Model architecture config
+│       ├── .training_meta.json        # Smart Guard metadata
+│       ├── historical_data.json       # Price data (regenerable)
+│       ├── news.json                  # Raw news articles (regenerable)
+│       └── news_with_price.json       # Training data with sentiment
+│
+├── requirements.txt                   # Python dependencies
+├── README.md                          # Learning guide
+├── CLAUDE.md                          # Technical reference (this file)
+└── hierarchical_sentiment_implementation_plan.md  # Architecture documentation
 ```
 
 ### File Categories
 
 | Category | Files | On Delete |
 |----------|-------|-----------|
-| **Protected** | `*.pth` | Hours of training to recreate |
-| **Regenerable** | `*.json` | Re-download in seconds |
+| **Protected** | `*.pth`, `*_metadata.json` | Hours of training to recreate |
+| **Regenerable** | `*.json` (except metadata) | Re-download in seconds |
 | **Metadata** | `.training_meta.json` | Auto-regenerated |
 
 ---
 
 ## File Reference
 
-### Scripts
+### CLI Commands
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `download.py` | ~822 | Fetches price data (yfinance) and news (Yahoo Finance), merges by timestamp |
-| `train.py` | ~1039 | Loads data, trains model, saves weights, implements Smart Guard |
-| `test.py` | ~515 | Loads model, evaluates on test data, reports accuracy/F1 |
+| `cli/finbert_sentiment/download.py` | ~1800 | Fetches price data, news, runs FinBERT sentiment |
+| `cli/finbert_sentiment/train.py` | ~1150 | Trains hierarchical model, implements Smart Guard |
+| `cli/finbert_sentiment/test.py` | ~1050 | Evaluates model, generates AI summary |
 
-### Model
+### Core Models
 
 | File | Purpose |
 |------|---------|
-| `models/gemma_transformer_classifier.py` | Defines `SimpleGemmaTransformerClassifier` with Gemma embeddings + Transformer encoder |
+| `src/models/transformer.py` | HierarchicalSentimentTransformer with cross-level attention |
+| `src/models/finbert_sentiment.py` | FinBERT analyzer with MD5 caching |
+| `src/models/report_summarizer.py` | Flan-T5 AI summary generator |
+
+### Data Processing
+
+| File | Purpose |
+|------|---------|
+| `src/data/news_classifier.py` | Classifies news into MARKET/SECTOR/TICKER levels |
+| `src/data/schemas.py` | Data structures for 40 hierarchical features |
+| `src/features/sentiment_aggregator.py` | Aggregates sentiment by level and time window |
 
 ### Data Files (per symbol)
 
 | File | Created By | Used By | Content |
 |------|------------|---------|---------|
-| `historical_data.json` | download.py | download.py | Price data (timestamp → price) |
-| `news.json` | download.py | download.py | Raw news articles |
-| `news_with_price.json` | download.py | train.py, test.py | Merged training data with labels |
-| `{SYMBOL}.pth` | train.py | test.py | Trained model weights |
-| `.training_meta.json` | train.py | train.py | Training history, data hash |
+| `historical_data.json` | download | download | Price data (timestamp → price) |
+| `news.json` | download | download | Raw news articles |
+| `news_with_price.json` | download | train, test | Training data with sentiment |
+| `{SYMBOL}.pth` | train | test | Trained model weights |
+| `{SYMBOL}_metadata.json` | train | test | Model architecture config |
+| `.training_meta.json` | train | train | Smart Guard metadata |
 
 ---
 
 ## CLI Commands Reference
 
-### download.py
+### Download Command
 
 ```bash
-python download.py -s SYMBOL [OPTIONS]
+python -m cli.finbert_sentiment.download -s SYMBOL [OPTIONS]
 ```
 
 | Argument | Short | Default | Description |
@@ -118,6 +172,8 @@ python download.py -s SYMBOL [OPTIONS]
 | `--period` | `-p` | `1mo` | How far back (1d, 5d, 1mo, 3mo, 6mo, 1y, max) |
 | `--interval` | `-i` | `5m` | Candle interval (1m, 2m, 5m, 15m, 30m, 1h, 1d) |
 | `--news-count` | `-n` | `100` | Number of news articles to fetch |
+| `--no-filter` | | `False` | Disable news relevance filtering |
+| `--no-sentiment` | | `False` | Skip FinBERT sentiment analysis |
 
 **Intraday Data Limits (yfinance):**
 
@@ -128,10 +184,10 @@ python download.py -s SYMBOL [OPTIONS]
 | 60m, 90m, 1h | 730 days |
 | 1d+ | Unlimited |
 
-### train.py
+### Train Command
 
 ```bash
-python train.py -s SYMBOL [OPTIONS]
+python -m cli.finbert_sentiment.train -s SYMBOL [OPTIONS]
 ```
 
 | Argument | Short | Default | Description |
@@ -146,26 +202,35 @@ python train.py -s SYMBOL [OPTIONS]
 | `--split` | | `0.8` | Train/test split ratio |
 | `--hidden-dim` | | `256` | Model internal dimension |
 | `--num-layers` | | `2` | Transformer encoder layers |
+| `--seq-length` | | `20` | Temporal sequence length |
 | `--fresh` | | `False` | Start from scratch (ignore existing .pth) |
 | `--force` | | `False` | Bypass Smart Training Guard |
 | `--min-new-samples` | | `5` | Minimum new samples to train |
 | `--cooldown` | | `5` | Minutes between training sessions |
 
-### test.py
+### Test Command
 
 ```bash
-python test.py -s SYMBOL [OPTIONS]
+python -m cli.finbert_sentiment.test -s SYMBOL [OPTIONS]
 ```
 
 | Argument | Short | Default | Description |
 |----------|-------|---------|-------------|
-| `--symbol` | `-s` | *required* | Trading symbol (must match train.py) |
-| `--buy-threshold` | `-b` | `1.0` | Must match train.py |
-| `--sell-threshold` | | `-1.0` | Must match train.py |
-| `--split` | | `0.8` | Must match train.py |
+| `--symbol` | `-s` | *required* | Trading symbol (must match train) |
+| `--buy-threshold` | `-b` | `1.0` | Must match train |
+| `--sell-threshold` | | `-1.0` | Must match train |
+| `--split` | | `0.8` | Must match train |
 | `--samples` | | `3` | Sample predictions to display |
-| `--hidden-dim` | | `256` | Must match train.py |
-| `--num-layers` | | `2` | Must match train.py |
+| `--hidden-dim` | | `256` | Must match train |
+| `--num-layers` | | `2` | Must match train |
+| `--summary` | | `False` | Generate AI-powered summary |
+| `--summary-model` | | `flan-t5-xl` | Model for AI summary |
+
+**AI Summary Models:**
+- `google/flan-t5-small` (80M) - Fastest
+- `google/flan-t5-base` (250M) - Balanced
+- `google/flan-t5-large` (780M) - Good quality
+- `google/flan-t5-xl` (3B) - Best quality (default)
 
 ---
 
@@ -182,11 +247,11 @@ python test.py -s SYMBOL [OPTIONS]
 
 ### Training Profiles
 
-| Profile | Settings | Training Time | Use Case |
-|---------|----------|---------------|----------|
-| **Speed** | `--batch-size 32 -e 20 -l 0.01` | ~10 min | Prototyping |
-| **Balanced** | `--batch-size 8 -e 50 -l 0.005` | ~30 min | General use |
-| **Precision** | `--batch-size 1 -e 200 -l 0.001 -o AdamW` | ~4 hours | Production |
+| Profile | Settings | Use Case |
+|---------|----------|----------|
+| **Speed** | `--batch-size 32 -e 20 -l 0.01` | Prototyping |
+| **Balanced** | `--batch-size 8 -e 50 -l 0.005` | General use |
+| **Precision** | `--batch-size 1 -e 200 -l 0.001 -o AdamW` | Production |
 
 ### Optimizer Comparison
 
@@ -218,14 +283,6 @@ python test.py -s SYMBOL [OPTIONS]
 | Weekends | -30-50% | ±0.5% to ±0.7% |
 | Holidays | -50-70% | ±0.3% to ±0.5% |
 
-### By Trader Profile
-
-| Style | Threshold | Signals/Day |
-|-------|-----------|-------------|
-| Conservative | Wider (+30%) | Fewer |
-| Balanced | Baseline | Moderate |
-| Aggressive | Tighter (-30%) | More |
-
 ### Quick Calibration
 
 Check label distribution after training:
@@ -240,100 +297,124 @@ Check label distribution after training:
 
 ## Model Architecture
 
-### Architecture Flow
+### HierarchicalSentimentTransformer
 
 ```
-Input: "Price: 95000, Headline: Bitcoin crashes..."
-                              │
-                              ▼
-                 ┌────────────────────────┐
-                 │   Gemma Embedding      │  ← Frozen (300M params)
-                 │   (1024 dimensions)    │
-                 └───────────┬────────────┘
-                              │
-                              ▼
-                 ┌────────────────────────┐
-                 │   Linear Projection    │  ← Trainable
-                 │   1024 → 256 dims      │
-                 └───────────┬────────────┘
-                              │
-                              ▼
-                 ┌────────────────────────┐
-                 │  TransformerEncoder    │  ← Trainable
-                 │  (2 layers, 4 heads)   │
-                 └───────────┬────────────┘
-                              │
-                              ▼
-                 ┌────────────────────────┐
-                 │   Classifier Head      │  ← Trainable
-                 │   256 → 3 classes      │
-                 └───────────┬────────────┘
-                              │
-                              ▼
-                 Output: [SELL, HOLD, BUY]
+Input: [batch, seq_len, 40 features]
+           │
+           ▼
+┌─────────────────────────────────────────────────────────┐
+│  Level-Specific Encoders                                │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌──────┐ │
+│  │ Ticker    │  │ Sector    │  │ Market    │  │Cross │ │
+│  │ (12→128)  │  │ (10→128)  │  │ (10→128)  │  │(8→128)│ │
+│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └──┬───┘ │
+│        └──────────────┼──────────────┼───────────┘     │
+│                       ▼                                │
+│  ┌────────────────────────────────────────────┐        │
+│  │     Cross-Level Attention Module           │        │
+│  │  • Ticker → Sector attention               │        │
+│  │  • Ticker → Market attention               │        │
+│  │  • Residual connections                    │        │
+│  └────────────────────────────────────────────┘        │
+└─────────────────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────────────────┐
+│  Fusion Layer (512 → 64)                                │
+│  LayerNorm → GELU → Dropout                             │
+└─────────────────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────────────────┐
+│  Positional Encoding (Sinusoidal)                       │
+└─────────────────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────────────────┐
+│  Temporal Transformer Encoder                           │
+│  • Multi-head self-attention (4 heads)                  │
+│  • 2 encoder layers                                     │
+│  • Feed-forward with GELU                               │
+└─────────────────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────────────────┐
+│  Classification Head                                    │
+│  Linear(64 → 3) → [SELL, HOLD, BUY]                    │
+└─────────────────────────────────────────────────────────┘
 ```
-
-### Trainable Parameters
-
-| Component | Parameters | Notes |
-|-----------|------------|-------|
-| Gemma Embedding | 300M | Frozen |
-| Linear Projection | ~262K | Trainable |
-| Transformer | ~400K | Trainable |
-| Classifier | ~770 | Trainable |
-| **Total Trainable** | ~660K | |
 
 ### Key Model Methods
 
 | Method | Purpose |
 |--------|---------|
-| `model(texts)` | Forward pass, returns logits |
-| `model.predict(text)` | Convenience method, returns dict |
-| `model.train()` | Enable training mode |
-| `model.eval()` | Enable evaluation mode |
+| `model(x)` | Forward pass, returns logits [batch, 3] |
+| `model.predict(x)` | Returns class, confidence, probabilities |
+| `model.get_level_importance()` | Returns attention weights per level |
+
+---
+
+## Hierarchical Sentiment Features
+
+### Feature Summary (40 Total)
+
+| Level | Count | Examples |
+|-------|-------|----------|
+| **Ticker** | 12 | sentiment_mean, momentum_1d, news_volume |
+| **Sector** | 10 | breadth, dispersion, leader_sentiment |
+| **Market** | 10 | fed_sentiment, fear_index, regime |
+| **Cross-Level** | 8 | ticker_vs_sector_deviation, divergence_score |
+
+### News Classification
+
+| Level | Triggers |
+|-------|----------|
+| **MARKET** | Fed, FOMC, GDP, inflation, unemployment, tariffs |
+| **SECTOR** | Industry-wide, regulatory, supply chain |
+| **TICKER** | Company name, earnings, CEO, product launch |
+
+### FinBERT Sentiment
+
+- **Model:** ProsusAI/finbert
+- **Score Range:** -1 (negative) to +1 (positive)
+- **Caching:** MD5-based to avoid recomputation
 
 ---
 
 ## Data Flow
 
 ```
-┌─────────────┐
-│   yfinance  │
-│  (prices)   │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────────────────────────────────┐
-│         download.py                     │
-│  • Fetches 5-min price candles           │
-│  • Fetches news headlines                │
-│  • Merges by timestamp                   │
-│  • Calculates 5-min future price change  │
-│  • Assigns SELL/HOLD/BUY labels          │
-└──────┬──────────────────────────────────┘
-       │
-       ▼
-┌──────────────────────────────┐
-│ news_with_price.json         │
-│ [                            │
-│   {                          │
-│     "title": "...",          │
-│     "price": 259.95,         │
-│     "future_price": 260.0,   │
-│     "percentage": 0.019      │
-│   }                          │
-│ ]                            │
-└──────┬───────────────────────┘
-       │
-       ├─────────────┬──────────────┐
-       ▼             ▼              ▼
-   [train]      [test]         [train.py]
-     80%          20%             │
-       │             │            ▼
-       ▼             ▼      ┌────────────┐
-    Training     Testing    │ {SYMBOL}   │
-    Loop         Loop       │   .pth     │
-                            └────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    DOWNLOAD PHASE                        │
+├─────────────────────────────────────────────────────────┤
+│  yfinance → Price data                                  │
+│  Yahoo/Alpha Vantage → News articles                    │
+│  NewsLevelClassifier → MARKET/SECTOR/TICKER labels      │
+│  FinBERT → Sentiment scores (-1 to +1)                  │
+│  → news_with_price.json                                 │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                     TRAIN PHASE                          │
+├─────────────────────────────────────────────────────────┤
+│  news_with_price.json                                   │
+│  → SentimentAggregator (40 features per timestep)       │
+│  → TemporalFeatureBuilder (sequences of 20)             │
+│  → HierarchicalSentimentTransformer                     │
+│  → {SYMBOL}.pth + metadata                              │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                      TEST PHASE                          │
+├─────────────────────────────────────────────────────────┤
+│  Load model from {SYMBOL}.pth                           │
+│  Evaluate on test split (20%)                           │
+│  Compute metrics (accuracy, F1, trading PnL)            │
+│  Generate AI summary with Flan-T5                       │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ### Label Assignment
@@ -360,23 +441,14 @@ Prevents overfitting by checking if training is needed.
 | Cooldown | Secondary | 5 min | Prevent rapid-fire training |
 | Min Samples | Tertiary | 5 | Skip if too few new samples |
 
-### Tuning Guards
-
-| Data Interval | Cooldown | Min Samples |
-|---------------|----------|-------------|
-| 1 minute | 1 | 3 |
-| 5 minutes | 5 | 5 |
-| 15 minutes | 15 | 5 |
-| 1 hour | 60 | 10 |
-
 ### Bypass Options
 
 ```bash
 # Force training (bypass all guards)
-python train.py -s BTC-USD --force
+python -m cli.finbert_sentiment.train -s BTC-USD --force
 
 # Custom guard settings
-python train.py -s BTC-USD --min-new-samples 20 --cooldown 120
+python -m cli.finbert_sentiment.train -s BTC-USD --min-new-samples 20 --cooldown 120
 ```
 
 ### Metadata File
@@ -400,7 +472,7 @@ Smart Guard stores history in `.training_meta.json`:
 
 ## Parameter Consistency Rules
 
-**CRITICAL**: Parameters must match between train.py and test.py.
+**CRITICAL**: Parameters must match between train and test.
 
 | Parameter | Mismatch Effect | Severity |
 |-----------|-----------------|----------|
@@ -415,10 +487,10 @@ Smart Guard stores history in `.training_meta.json`:
 
 ```bash
 # Training
-python train.py -s BTC-USD -b 0.1 --sell-threshold -0.1 --hidden-dim 512 --num-layers 4
+python -m cli.finbert_sentiment.train -s BTC-USD -b 0.1 --sell-threshold -0.1 --hidden-dim 512 --num-layers 4
 
 # Testing (MUST MATCH)
-python test.py -s BTC-USD -b 0.1 --sell-threshold -0.1 --hidden-dim 512 --num-layers 4
+python -m cli.finbert_sentiment.test -s BTC-USD -b 0.1 --sell-threshold -0.1 --hidden-dim 512 --num-layers 4
 ```
 
 ---
@@ -472,6 +544,7 @@ All major issues have been resolved:
 | Inverted label calculation | Fixed - uses `future_price - price` |
 | Wrong threshold values | Fixed - uses ±1.0% |
 | Unnecessary model save in test.py | Fixed - removed |
+| Root-level scripts cluttering project | Fixed - moved to cli/ |
 
 ---
 
@@ -499,7 +572,7 @@ All major issues have been resolved:
 - `ReduceLROnPlateau`: Decay when loss plateaus
 
 ```bash
-python train.py -s BTC-USD --lr-schedule cosine
+python -m cli.finbert_sentiment.train -s BTC-USD --lr-schedule cosine
 ```
 
 ---
@@ -515,36 +588,26 @@ Add temporal context from timestamps:
 
 ---
 
-#### 4. Market Volatility Indicator
+#### 4. Additional Strategies
 
-Add rolling statistics:
-- Median % change over past N intervals
-- Standard deviation (volatility measure)
-- Direction bias
-
----
-
-#### 5. Sequence Data
-
-Instead of single news → prediction, use sequence of recent news:
-- Concatenate last N articles
-- Capture sentiment momentum
+Add new strategy folders:
+- `cli/rsi/` - RSI-based technical strategy
+- `cli/macd/` - MACD crossover strategy
+- `cli/combined/` - Multi-signal ensemble
 
 ---
 
 ### Lower Priority
 
-#### 6. Dropout Rate Tuning
+#### 5. Dropout Rate Tuning
 
 Expose dropout as CLI parameter (currently hardcoded at 0.1).
 
-#### 7. Multi-stage Batch Training
+#### 6. Multi-stage Batch Training
 
-Vary batch size during training:
-- Start large, decrease to small
-- Or start small, increase to large
+Vary batch size during training.
 
-#### 8. Reinforcement Learning
+#### 7. Reinforcement Learning
 
 Replace supervised classification with RL to optimize for profit directly.
 
@@ -558,11 +621,9 @@ Replace supervised classification with RL to optimize for profit directly.
 | Learning rate scheduling | Low-Medium | Medium |
 | Dropout tuning | Low | Low-Medium |
 | Time features | Medium | Medium |
-| Market volatility | Medium | Medium |
-| Sequence data | Medium-High | Medium-High |
-| Multi-stage batch | Low-Medium | Low |
+| Additional strategies | Medium | HIGH |
 | Reinforcement learning | HIGH | HIGH |
 
 ---
 
-**Document Version**: 2.0 | **Last Updated**: January 2025
+**Document Version**: 3.0 | **Last Updated**: January 2025
