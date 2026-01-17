@@ -5,10 +5,10 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List
 
-from providers.base import BaseProvider
-from providers.config import (
-    FINANCIALDATASETS_BASE_URL,
-    FINANCIALDATASETS_ENDPOINTS,
+from ..base import BaseProvider
+from .config import (
+    BASE_URL,
+    ENDPOINTS,
 )
 
 
@@ -24,7 +24,7 @@ class FinancialDatasetsProvider(BaseProvider):
 
     def __init__(self, symbol: str) -> None:
         super().__init__(symbol)
-        self.endpoint_config = FINANCIALDATASETS_ENDPOINTS["news"]
+        self.endpoint_config = ENDPOINTS["news"]
 
     @property
     def name(self) -> str:
@@ -37,7 +37,7 @@ class FinancialDatasetsProvider(BaseProvider):
     def download(self) -> List[Dict[str, Any]]:
         """Download and normalize news from FinancialDatasets.ai."""
         path = self.endpoint_config["path"]
-        url = f"{FINANCIALDATASETS_BASE_URL}{path}?ticker={self.symbol}"
+        url = f"{BASE_URL}{path}?ticker={self.symbol}"
 
         try:
             req = urllib.request.Request(

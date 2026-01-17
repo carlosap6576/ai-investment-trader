@@ -168,8 +168,8 @@ class DownloadConfig:
         self.symbol = self.symbol.upper()
         self.interval_seconds = INTERVAL_SECONDS[self.interval]
         self.symbol_dir = f"{DATASETS_DIR}/{self.symbol}"
-        self.historical_data_file = f"{self.symbol_dir}/historical_data.json"
-        self.news_file = f"{self.symbol_dir}/news.json"
+        self.historical_data_file = f"{self.symbol_dir}/yahoo_historical_data.json"
+        self.news_file = f"{self.symbol_dir}/yahoo_news.json"
         self.training_data_file = f"{self.symbol_dir}/news_with_price.json"
 
 

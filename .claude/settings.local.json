@@ -13,7 +13,17 @@
       "Bash(wc:*)",
       "Bash(du:*)",
       "Bash(git -C /mnt/e/github.com/ai-investment-trader log --oneline -10)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "WebFetch(domain:docs.data.nasdaq.com)",
+      "WebFetch(domain:docs.intrinio.com)",
+      "WebFetch(domain:docs.coingecko.com)",
+      "WebFetch(domain:data.nasdaq.com)",
+      "WebFetch(domain:api.coingecko.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.alphavantage.co)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:massive.com)",
+      "WebFetch(domain:www.coingecko.com)"
     ]
   }
 }

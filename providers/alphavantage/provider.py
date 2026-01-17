@@ -5,11 +5,11 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List
 
-from providers.base import BaseProvider
-from providers.config import (
-    ALPHAVANTAGE_API_KEY,
-    ALPHAVANTAGE_BASE_URL,
-    ALPHAVANTAGE_ENDPOINTS,
+from ..base import BaseProvider
+from .config import (
+    API_KEY,
+    BASE_URL,
+    ENDPOINTS,
 )
 
 
@@ -41,10 +41,10 @@ class AlphaVantageProvider(BaseProvider):
             endpoint: One of: quote, news, news_market, overview, income, balance, cashflow, shares
         """
         super().__init__(symbol)
-        if endpoint not in ALPHAVANTAGE_ENDPOINTS:
-            raise ValueError(f"Unknown endpoint: {endpoint}. Valid: {list(ALPHAVANTAGE_ENDPOINTS.keys())}")
+        if endpoint not in ENDPOINTS:
+            raise ValueError(f"Unknown endpoint: {endpoint}. Valid: {list(ENDPOINTS.keys())}")
         self.endpoint = endpoint
-        self.endpoint_config = ALPHAVANTAGE_ENDPOINTS[endpoint]
+        self.endpoint_config = ENDPOINTS[endpoint]
 
     @property
     def name(self) -> str:
@@ -58,7 +58,7 @@ class AlphaVantageProvider(BaseProvider):
     def _build_url(self) -> str:
         """Build the API URL for the endpoint."""
         function = self.endpoint_config["function"]
-        url = f"{ALPHAVANTAGE_BASE_URL}/query?function={function}&apikey={ALPHAVANTAGE_API_KEY}"
+        url = f"{BASE_URL}/query?function={function}&apikey={API_KEY}"
 
         # Add symbol for non-market endpoints
         if self.endpoint not in ["news_market"]:
@@ -135,20 +135,24 @@ class AlphaVantageProvider(BaseProvider):
 
 class AlphaVantageAllProvider:
     """
-    Convenience wrapper to download all Alpha Vantage data for a symbol.
+    Convenience wrapper to download Alpha Vantage data for a symbol.
+
+    Note: Only quote endpoint is enabled to avoid rate limit errors.
+    Other endpoints (news, overview, financials) require premium API.
 
     Usage:
         provider = AlphaVantageAllProvider("AAPL")
         results = provider.run()
     """
 
-    ENDPOINTS = ["quote", "news", "news_market", "overview", "income", "balance", "cashflow", "shares"]
+    # Only quote endpoint - others hit rate limits on free tier
+    ENDPOINTS = ["quote"]
 
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol.upper()
 
     def run(self) -> Dict[str, Any]:
-        """Run all AlphaVantage downloads."""
+        """Run AlphaVantage downloads."""
         results = {}
         for endpoint in self.ENDPOINTS:
             provider = AlphaVantageProvider(self.symbol, endpoint)

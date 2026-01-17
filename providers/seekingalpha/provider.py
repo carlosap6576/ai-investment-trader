@@ -5,10 +5,10 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List
 
-from providers.base import BaseProvider
-from providers.config import (
-    SEEKINGALPHA_BASE_URL,
-    SEEKINGALPHA_ENDPOINTS,
+from ..base import BaseProvider
+from .config import (
+    BASE_URL,
+    ENDPOINTS,
 )
 
 
@@ -21,7 +21,7 @@ class SeekingAlphaNewsProvider(BaseProvider):
 
     def __init__(self, symbol: str) -> None:
         super().__init__(symbol)
-        self.endpoint_config = SEEKINGALPHA_ENDPOINTS["news"]
+        self.endpoint_config = ENDPOINTS["news"]
 
     @property
     def name(self) -> str:
@@ -35,7 +35,7 @@ class SeekingAlphaNewsProvider(BaseProvider):
         """Download news from Seeking Alpha."""
         path = self.endpoint_config["path"].replace("{symbol}", self.symbol.lower())
         params = self.endpoint_config["params"]
-        url = f"{SEEKINGALPHA_BASE_URL}{path}?id={self.symbol.lower()}&{params}"
+        url = f"{BASE_URL}{path}?id={self.symbol.lower()}&{params}"
 
         try:
             req = urllib.request.Request(
@@ -81,7 +81,7 @@ class SeekingAlphaDividendsProvider(BaseProvider):
 
     def __init__(self, symbol: str) -> None:
         super().__init__(symbol)
-        self.endpoint_config = SEEKINGALPHA_ENDPOINTS["dividends"]
+        self.endpoint_config = ENDPOINTS["dividends"]
 
     @property
     def name(self) -> str:
@@ -95,7 +95,7 @@ class SeekingAlphaDividendsProvider(BaseProvider):
         """Download dividend history from Seeking Alpha."""
         path = self.endpoint_config["path"].replace("{symbol}", self.symbol.lower())
         params = self.endpoint_config["params"]
-        url = f"{SEEKINGALPHA_BASE_URL}{path}?{params}"
+        url = f"{BASE_URL}{path}?{params}"
 
         try:
             req = urllib.request.Request(

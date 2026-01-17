@@ -10,3 +10,5 @@ torch
 torchvision
 transformers
 tf-keras
+nasdaq-data-link
+pycoingecko

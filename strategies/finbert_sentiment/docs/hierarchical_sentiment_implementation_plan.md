@@ -465,8 +465,8 @@ python -m cli.finbert_sentiment.download -s SYMBOL [OPTIONS]
 | `--no-sentiment` | `False` | Skip FinBERT analysis |
 
 **Output Files:**
-- `historical_data.json` - Price data
-- `news.json` - Raw news articles
+- `yahoo_historical_data.json` - Yahoo price data
+- `yahoo_news.json` - Yahoo news articles
 - `news_with_price.json` - Training data with sentiment
 
 ---

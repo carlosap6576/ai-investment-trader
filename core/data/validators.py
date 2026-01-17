@@ -1,4 +1,4 @@
-"""
+/"""
 Data validation utilities.
 
 Provides validation functions for periods, intervals, tickers, and thresholds.

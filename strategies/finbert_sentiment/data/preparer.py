@@ -4,6 +4,12 @@ Data Preparer for the FinBERT Sentiment Strategy.
 Downloads data using the providers module, then prepares training data
 by merging news with prices and adding sentiment analysis.
 
+Note: This application supports STOCKS ONLY (NASDAQ, NYSE, etc.)
+      Cryptocurrency symbols are not supported.
+
+Sentiment source:
+- FinBERT: Text sentiment analysis (-1 to +1)
+
 Usage:
     from strategies.finbert_sentiment.data.config import DownloadConfig
     from strategies.finbert_sentiment.data.preparer import DataPreparer
@@ -122,11 +128,11 @@ class DataPreparer:
         self.ensure_directory()
 
         # Create empty files if they don't exist
-        for filename in ["historical_data.json", "news.json"]:
+        for filename in ["yahoo_historical_data.json", "yahoo_news.json"]:
             filepath = f"{self.config.symbol_dir}/{filename}"
             if not os.path.exists(filepath):
                 with open(filepath, 'w') as f:
-                    if filename == "historical_data.json":
+                    if filename == "yahoo_historical_data.json":
                         json.dump({}, f)
                     else:
                         json.dump([], f)
@@ -138,16 +144,18 @@ class DataPreparer:
     # =========================================================================
 
     def download_all(self) -> None:
-        """Download data from all providers."""
+        """Download data from all stock providers (stocks only, no crypto)."""
         from providers.yahoo import YahooProvider
         from providers.alphavantage import AlphaVantageAllProvider
         from providers.seekingalpha import SeekingAlphaProvider
         from providers.financialdatasets import FinancialDatasetsProvider
+        from providers.polygon import PolygonProvider
+        from providers.nasdaq import NasdaqProvider
 
         config = self.config
 
         # Yahoo Finance (prices + news)
-        print("\n  [Yahoo Finance]")
+        print("\n  [1/6] Yahoo Finance")
         yahoo = YahooProvider(
             config.symbol,
             config.period,
@@ -156,20 +164,33 @@ class DataPreparer:
         )
         yahoo.run()
 
-        # Alpha Vantage (all endpoints)
-        print("\n  [Alpha Vantage]")
+        # Alpha Vantage (quote only - other endpoints hit rate limits)
+        print("\n  [2/6] Alpha Vantage")
         alphavantage = AlphaVantageAllProvider(config.symbol)
         alphavantage.run()
 
         # Seeking Alpha (news + dividends)
-        print("\n  [Seeking Alpha]")
+        print("\n  [3/6] Seeking Alpha")
         seekingalpha = SeekingAlphaProvider(config.symbol)
         seekingalpha.run()
 
         # FinancialDatasets (news)
-        print("\n  [FinancialDatasets.ai]")
+        print("\n  [4/6] FinancialDatasets.ai")
         financialdatasets = FinancialDatasetsProvider(config.symbol)
         financialdatasets.run()
+
+        # Polygon (aggregates, previous day, ticker info, news)
+        print("\n  [5/6] Polygon")
+        polygon = PolygonProvider(config.symbol, days=30, news_limit=100)
+        polygon.run()
+
+        # Nasdaq Data Link (historical data through 2018)
+        print("\n  [6/6] Nasdaq Data Link")
+        try:
+            nasdaq = NasdaqProvider(config.symbol)
+            nasdaq.run()
+        except Exception as e:
+            print(f"    Skipped (may not have data): {e}")
 
     # =========================================================================
     # DATA PREPARATION (Strategy-specific)
@@ -191,18 +212,62 @@ class DataPreparer:
         print("  Preparing training data...")
         output = []
 
-        # Load data
+        # Load price data (convert array format to lookup dict)
+        ticker_prices = {}
         try:
             with open(config.historical_data_file, 'r') as f:
-                ticker_prices = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            ticker_prices = {}
+                price_data = json.load(f)
 
+            # Handle new array format: [{timestamp, open, ...}, ...]
+            if isinstance(price_data, list):
+                for record in price_data:
+                    ts = record.get("timestamp")
+                    price = record.get("open")
+                    if ts is not None and price is not None:
+                        ticker_prices[str(ts)] = price
+            # Handle legacy dict format: {timestamp: price, ...}
+            elif isinstance(price_data, dict):
+                ticker_prices = price_data
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        # Load news from multiple sources
+        news = []
+        news_sources = {"yahoo": 0, "polygon": 0}
+
+        # Primary news file (Yahoo + others that merge into news.json)
         try:
             with open(config.news_file, 'r') as f:
-                news = json.load(f)
+                yahoo_news = json.load(f)
+                if isinstance(yahoo_news, list):
+                    # Add source field to each article
+                    for article in yahoo_news:
+                        article['source'] = 'yahoo'
+                    news.extend(yahoo_news)
+                    news_sources["yahoo"] = len(yahoo_news)
         except (FileNotFoundError, json.JSONDecodeError):
-            news = []
+            pass
+
+        # Polygon news (separate file)
+        polygon_news_file = f"{config.symbol_dir}/polygon_news.json"
+        try:
+            with open(polygon_news_file, 'r') as f:
+                polygon_news = json.load(f)
+                if isinstance(polygon_news, list):
+                    # Convert Polygon format to standard format
+                    for article in polygon_news:
+                        converted = {
+                            'title': article.get('title', ''),
+                            'summary': article.get('description', ''),
+                            'pubDate': article.get('published_utc', ''),
+                            'source': 'polygon',
+                        }
+                        news.append(converted)
+                    news_sources["polygon"] = len(polygon_news)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        print(f"  Loaded news: Yahoo={news_sources['yahoo']}, Polygon={news_sources['polygon']}")
 
         if not ticker_prices:
             print("  WARNING: No price data available. Skipping data preparation.")
@@ -239,9 +304,10 @@ class DataPreparer:
         matched = 0
         skipped = 0
         filtered = 0
+        sentiment_sources = {"finbert": 0, "none": 0}
         level_counts = {"MARKET": 0, "SECTOR": 0, "TICKER": 0}
 
-        # Collect texts for batch sentiment analysis
+        # Collect texts for batch sentiment analysis (FinBERT fallback)
         texts_for_sentiment = []
         items_for_sentiment = []
 
@@ -301,6 +367,9 @@ class DataPreparer:
             difference = future_price - price
             percentage = (difference / price) * 100
 
+            # Get news source (yahoo, polygon, etc.)
+            news_source = item.get('source', 'unknown')
+
             # Build training record
             record = {
                 'title': title,
@@ -314,6 +383,8 @@ class DataPreparer:
                 'pubDate_ts': pubDate_ts,
                 'level': level,
                 'sector_gics': sector_gics,
+                'source': news_source,  # Track which provider this news came from
+                # FinBERT sentiment
                 'sentiment_score': None,
                 'sentiment_label': None,
                 'sentiment_confidence': None,
@@ -321,7 +392,7 @@ class DataPreparer:
 
             output.append(record)
 
-            # Prepare text for sentiment analysis
+            # Queue for FinBERT analysis
             if sentiment_analyzer is not None:
                 text = f"{title} {summary}".strip()
                 texts_for_sentiment.append(text)
@@ -329,7 +400,7 @@ class DataPreparer:
 
             matched += 1
 
-        # Run batch sentiment analysis
+        # Run batch FinBERT sentiment analysis
         if sentiment_analyzer is not None and texts_for_sentiment:
             print(f"  Running FinBERT sentiment analysis on {len(texts_for_sentiment)} articles...")
             try:
@@ -338,9 +409,20 @@ class DataPreparer:
                     record['sentiment_score'] = result.score
                     record['sentiment_label'] = result.label
                     record['sentiment_confidence'] = result.confidence
-                print(f"  Sentiment analysis complete.")
+                    sentiment_sources['finbert'] += 1
+                print(f"  FinBERT sentiment analysis complete.")
             except Exception as e:
-                print(f"  WARNING: Sentiment analysis failed: {e}")
+                print(f"  WARNING: FinBERT sentiment analysis failed: {e}")
+                sentiment_sources['none'] += len(items_for_sentiment)
+        else:
+            # No sentiment analyzer available
+            sentiment_sources['none'] += len(output)
+
+        # Count news sources in output
+        source_counts = {}
+        for record in output:
+            src = record.get('source', 'unknown')
+            source_counts[src] = source_counts.get(src, 0) + 1
 
         # Save training data
         with open(config.training_data_file, 'w') as f:
@@ -354,6 +436,14 @@ class DataPreparer:
             print(f"  Skipped {skipped} articles (missing data)")
         print(f"  Level distribution: MARKET={level_counts['MARKET']}, "
               f"SECTOR={level_counts['SECTOR']}, TICKER={level_counts['TICKER']}")
+
+        # News source summary
+        source_str = ", ".join(f"{k}={v}" for k, v in sorted(source_counts.items()))
+        print(f"  News sources: {source_str}")
+
+        # Sentiment summary
+        print(f"  Sentiment: FinBERT={sentiment_sources['finbert']}, None={sentiment_sources['none']}")
+
         print(f"  Saved training data to {config.training_data_file}")
 
     # =========================================================================
@@ -379,7 +469,7 @@ class DataPreparer:
 
         is_valid, error_msg = self.validate_ticker()
         if not is_valid:
-            sys.stderr.write(error_msg)
+            sys.stderr.write(error_msg or "Unknown validation error\n")
             return False
 
         # Step 2: Initialize
@@ -387,7 +477,7 @@ class DataPreparer:
         print("-" * 60)
 
         print(f"  Configuration:")
-        print(f"    Symbol:     {config.symbol}")
+        print(f"    Symbol:     {config.symbol} (Stock)")
         print(f"    Period:     {config.period}")
         print(f"    Interval:   {config.interval} ({config.interval_seconds}s)")
         print(f"    News count: {config.news_count}")

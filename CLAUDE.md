@@ -2,6 +2,30 @@
 
 This file provides technical guidance for Claude Code and developers working with this repository.
 
+---
+
+## Refactoring Session Notes (January 2025)
+
+### Completed Refactoring
+- **Extracted providers module** - Reusable data providers at `providers/` (Yahoo, AlphaVantage, SeekingAlpha, FinancialDatasets, Polygon, Nasdaq)
+- **Separated concerns** - CLI wrappers are thin, business logic lives in `strategies/` and `providers/`
+- **Modularized configs** - Split monolithic config into module-specific configs (`data/config.py`, `training/config.py`, `evaluation/config.py`)
+- **Removed unnecessary files** - Deleted empty `__init__.py` files (not needed in Python 3.3+)
+- **Created DataPreparer** - New class at `strategies/finbert_sentiment/data/preparer.py` uses providers then adds strategy-specific logic (sentiment, classification)
+- **Stocks only** - Removed CoinGecko/crypto support; application supports NASDAQ/NYSE stocks only
+- **Consistent file naming** - All provider output files prefixed with provider name (e.g., `yahoo_historical_data.json`, `polygon_news.json`)
+- **Unified data format** - Yahoo historical data now uses same OHLCV array format as Polygon
+- **UTC timestamps** - All datetime fields use ISO 8601 with `Z` suffix for UTC consistency
+- **Source tracking** - News articles include `source` field to track provider origin
+
+### Next Steps (TODO)
+- [ ] Refactor `cli/finbert_sentiment/train.py` to use `strategies/finbert_sentiment/training/trainer.py`
+- [ ] Refactor `cli/finbert_sentiment/test.py` to use `strategies/finbert_sentiment/evaluation/evaluator.py`
+- [ ] Add unit tests for providers module
+- [ ] Consider adding Finnhub provider
+
+---
+
 ```
 CORE COMMANDS PIPELINE (DO NOT DELETE):
   Option A: Maximum Intraday Data (1 month, 5-minute)
@@ -48,12 +72,39 @@ CORE COMMANDS PIPELINE (DO NOT DELETE):
 
 ```
 ai-investment-trader/
-├── cli/                               # Command-line interface
-│   └── finbert_sentiment/             # FinBERT sentiment strategy
-│       ├── __init__.py
-│       ├── download.py                # Data collection with sentiment analysis
-│       ├── train.py                   # Model training with Smart Guard
-│       └── test.py                    # Evaluation with AI summary
+├── cli/                               # Command-line interface (thin wrappers)
+│   ├── finbert_sentiment/             # FinBERT sentiment strategy CLI
+│   │   ├── download.py                # Data collection with sentiment analysis
+│   │   ├── train.py                   # Model training with Smart Guard
+│   │   └── test.py                    # Evaluation with AI summary
+│   │
+│   └── providers/                     # Data provider CLIs
+│       ├── yahoo.py                   # Yahoo Finance (prices + news)
+│       ├── alphavantage.py            # Alpha Vantage (8 endpoints)
+│       ├── seekingalpha.py            # Seeking Alpha (news + dividends)
+│       ├── financialdatasets.py       # FinancialDatasets.ai (news)
+│       └── all.py                     # Download from all providers
+│
+├── providers/                         # Reusable data provider classes
+│   ├── base.py                        # BaseProvider ABC + ProviderResult
+│   ├── config.py                      # API keys, endpoints, constants
+│   ├── yahoo.py                       # YahooProvider (prices + news)
+│   ├── alphavantage.py                # AlphaVantageProvider (8 endpoints)
+│   ├── seekingalpha.py                # SeekingAlphaProvider (news + dividends)
+│   └── financialdatasets.py           # FinancialDatasetsProvider (news)
+│
+├── strategies/                        # Strategy-specific business logic
+│   └── finbert_sentiment/
+│       ├── constants.py               # Shared constants (DATASETS_DIR, LABEL_NAMES)
+│       ├── data/
+│       │   ├── config.py              # DownloadConfig dataclass
+│       │   └── preparer.py            # DataPreparer (uses providers + adds sentiment)
+│       ├── training/
+│       │   ├── config.py              # TrainConfig dataclass
+│       │   └── trainer.py             # ModelTrainer class
+│       └── evaluation/
+│           ├── config.py              # TestConfig dataclass
+│           └── evaluator.py           # ModelEvaluator class
 │
 ├── src/                               # Core application logic
 │   ├── data/
@@ -99,8 +150,8 @@ ai-investment-trader/
 │       ├── {SYMBOL}.pth               # Trained model weights
 │       ├── {SYMBOL}_metadata.json     # Model architecture config
 │       ├── .training_meta.json        # Smart Guard metadata
-│       ├── historical_data.json       # Price data (regenerable)
-│       ├── news.json                  # Raw news articles (regenerable)
+│       ├── yahoo_historical_data.json # Yahoo price data (regenerable)
+│       ├── yahoo_news.json            # Yahoo news articles (regenerable)
 │       └── news_with_price.json       # Training data with sentiment
 │
 ├── requirements.txt                   # Python dependencies
@@ -149,12 +200,80 @@ ai-investment-trader/
 
 | File | Created By | Used By | Content |
 |------|------------|---------|---------|
-| `historical_data.json` | download | download | Price data (timestamp → price) |
-| `news.json` | download | download | Raw news articles |
-| `news_with_price.json` | download | train, test | Training data with sentiment |
+| `yahoo_historical_data.json` | Yahoo provider | preparer | OHLCV price data array |
+| `yahoo_news.json` | Yahoo provider | preparer | Yahoo news articles |
+| `polygon_aggregates.json` | Polygon provider | - | OHLCV price data array |
+| `polygon_news.json` | Polygon provider | preparer | Polygon news articles |
+| `news_with_price.json` | preparer | train, test | Training data with sentiment |
 | `{SYMBOL}.pth` | train | test | Trained model weights |
 | `{SYMBOL}_metadata.json` | train | test | Model architecture config |
 | `.training_meta.json` | train | train | Smart Guard metadata |
+
+---
+
+## Data Format Standards
+
+### Price Data Format (OHLCV Array)
+
+All price data files use the same array format for consistency:
+
+```json
+[
+  {
+    "timestamp": 1768194000000,
+    "datetime": "2026-01-12T00:00:00Z",
+    "open": 259.16,
+    "high": 261.3,
+    "low": 256.8,
+    "close": 260.25,
+    "volume": 45263767
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | int | Unix milliseconds (UTC) - **source of truth for correlation** |
+| `datetime` | string | ISO 8601 with `Z` suffix (UTC) - human readable |
+| `open` | float | Opening price |
+| `high` | float | Highest price |
+| `low` | float | Lowest price |
+| `close` | float | Closing price |
+| `volume` | int | Trading volume |
+
+### News Data Format
+
+```json
+{
+  "title": "Article headline",
+  "summary": "Article description",
+  "pubDate": "2026-01-17T17:48:53Z",
+  "source": "yahoo"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pubDate` | string | ISO 8601 with `Z` suffix (UTC) |
+| `source` | string | Provider origin: `yahoo`, `polygon`, etc. |
+
+### Timestamp Correlation
+
+The `timestamp` field (Unix milliseconds) is **timezone-independent** and used for all data correlation:
+
+```
+News:   timestamp: 1765981800000  →  pubDate:  "2025-12-17T14:30:00Z"
+Price:  timestamp: 1765981800000  →  datetime: "2025-12-17T14:30:00Z"
+                ↑                              ↑
+           EXACT MATCH                   Human readable
+```
+
+The preparer matches news to prices using timestamps, not datetime strings.
+
+### Backwards Compatibility
+
+- Legacy `{timestamp: price}` dict format is auto-converted when loading
+- Preparer handles both array and dict formats transparently
 
 ---
 
@@ -168,7 +287,7 @@ python -m cli.finbert_sentiment.download -s SYMBOL [OPTIONS]
 
 | Argument | Short | Default | Description |
 |----------|-------|---------|-------------|
-| `--symbol` | `-s` | *required* | Trading symbol (BTC-USD, AAPL, etc.) |
+| `--symbol` | `-s` | *required* | Stock ticker symbol (AAPL, MSFT, GOOGL, etc.) |
 | `--period` | `-p` | `1mo` | How far back (1d, 5d, 1mo, 3mo, 6mo, 1y, max) |
 | `--interval` | `-i` | `5m` | Candle interval (1m, 2m, 5m, 15m, 30m, 1h, 1d) |
 | `--news-count` | `-n` | `100` | Number of news articles to fetch |
@@ -231,6 +350,49 @@ python -m cli.finbert_sentiment.test -s SYMBOL [OPTIONS]
 - `google/flan-t5-base` (250M) - Balanced
 - `google/flan-t5-large` (780M) - Good quality
 - `google/flan-t5-xl` (3B) - Best quality (default)
+
+### Provider Commands
+
+Individual providers can be run directly for testing or standalone data collection.
+
+```bash
+# [1/6] Yahoo Finance (prices + news)
+python -m cli.providers.yahoo -s AAPL -p 1mo -i 5m
+python -m cli.providers.yahoo -s AAPL --prices-only
+python -m cli.providers.yahoo -s AAPL --news-only
+
+# [2/6] Alpha Vantage (quote only - other endpoints hit rate limits)
+python -m cli.providers.alphavantage -s AAPL
+
+# [3/6] Seeking Alpha (news + dividends)
+python -m cli.providers.seekingalpha -s AAPL
+python -m cli.providers.seekingalpha -s AAPL --news-only
+python -m cli.providers.seekingalpha -s AAPL --dividends-only
+
+# [4/6] FinancialDatasets.ai (news)
+python -m cli.providers.financialdatasets -s AAPL
+
+# [5/6] Polygon (aggregates + news + ticker info)
+python -m cli.providers.polygon -s AAPL
+
+# [6/6] Nasdaq Data Link (historical prices)
+python -m cli.providers.nasdaq -s AAPL
+
+# All 6 providers at once
+python -m cli.providers.all -s AAPL -p 1mo -i 5m
+```
+
+**Provider Output:**
+All providers save data to `datasets/{SYMBOL}/` and merge with existing data.
+
+| Provider | Output Files |
+|----------|--------------|
+| Yahoo | `yahoo_historical_data.json`, `yahoo_news.json` |
+| Alpha Vantage | `alphavantage_{endpoint}.json` |
+| Seeking Alpha | `seekingalpha_news.json`, `seekingalpha_dividends.json` |
+| FinancialDatasets | `financialdataset_news.json` |
+| Polygon | `polygon_aggregates.json`, `polygon_news.json`, `polygon_ticker.json` |
+| Nasdaq | `nasdaq_prices.json` |
 
 ---
 
@@ -626,4 +788,4 @@ Replace supervised classification with RL to optimize for profit directly.
 
 ---
 
-**Document Version**: 3.0 | **Last Updated**: January 2025
+**Document Version**: 4.0 | **Last Updated**: January 2025 | **Refactoring**: Providers module extracted
